@@ -1,0 +1,47 @@
+name: 每日四星大吉寻宝
+
+on:
+  schedule:
+    # UTC 22:03 = 北京时间次日 06:03，再随机延迟 0 至 10 分钟。
+    - cron: '3 22 * * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'inspect 只检查；once 寻宝一次；all 用完当天次数'
+        type: choice
+        default: inspect
+        options:
+          - inspect
+          - once
+          - all
+
+permissions:
+  contents: read
+
+concurrency:
+  group: speed-treasure
+  cancel-in-progress: false
+
+jobs:
+  treasure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: 运行寻宝
+        env:
+          SPEED_AUTH_JSON: ${{ secrets.SPEED_AUTH_JSON }}
+          RUN_MODE: ${{ inputs.mode || 'all' }}
+          EVENT_NAME: ${{ github.event_name }}
+        shell: bash
+        run: |
+          if [ "$EVENT_NAME" = "schedule" ]; then
+            python treasure.py --mode all --jitter
+          else
+            python treasure.py --mode "$RUN_MODE"
+          fi
