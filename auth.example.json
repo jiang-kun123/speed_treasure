@@ -1,0 +1,12 @@
+{
+  "access_token": "REPLACE_WITH_FRESH_T_ACCESS_TOKEN",
+  "openid": "REPLACE_WITH_T_OPENID",
+  "role_id": "REPLACE_WITH_ROLE_ID",
+  "area_id": 1,
+  "role_name": "",
+  "partition_name": "",
+  "user_attach": {
+    "nickName": "",
+    "avatar": ""
+  }
+}
