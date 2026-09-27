@@ -3,7 +3,7 @@ name: 每日四星大吉寻宝
 on:
   schedule:
     # UTC 22:03 = 北京时间次日 06:03，再随机延迟 0 至 10 分钟。
-    - cron: '0 1 * * *'
+    - cron: '3 22 * * *'
   workflow_dispatch:
     inputs:
       mode:
