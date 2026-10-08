@@ -2,6 +2,8 @@
 
 基于 2026-09-26 提供的抓包整理。只执行免费每日寻宝，选择四星中的“今日大吉”，约 10 秒后结算，再循环至次数为零。无需手机持续在线；账号凭据失效后需要从手机重新获取并更新 Secret。
 
+支持 1 至 5 个账号，按顺序处理。旧的单账号 Secret 继续有效。
+
 **状态：已完成离线测试，尚未连接真实账号验证。** 项目没有保存聊天中的令牌、Cookie 或账号标识。第一次请先执行 inspect，再执行 once 验证一次完整流程。
 
 ## 1. 新建仓库并放入文件
@@ -25,8 +27,23 @@ GitHub 上传 ZIP 不会自动解压成项目。需要解压后上传文件。�
 
 名称：`SPEED_AUTH_JSON`。值填写 `auth.example.json` 的结构，并替换占位符：
 
+添加其他账号时分别新建以下 Secrets，每个值都是一个账号的完整 JSON 对象，不需要合并成数组；没有配置的账号会跳过。
+
+| 账号 | Secret 名称 |
+|---|---|
+| 1（原账号） | SPEED_AUTH_JSON |
+| 2 | SPEED_AUTH_JSON_2 |
+| 3 | SPEED_AUTH_JSON_3 |
+| 4 | SPEED_AUTH_JSON_4 |
+| 5 | SPEED_AUTH_JSON_5 |
+
+可以在每个对象中添加 `"label": "大号"` 等备注，Summary 按账号序号和备注分别展示奖励。备注不要填写密码或令牌。某个账号的 JSON 错误、登录失效或寻宝失败后，会继续执行其他账号；只要有一个账号失败，最终工作流就标记为失败。重复填写相同角色和大区时会跳过后一个并报错。
+
+从单账号版本升级时，必须同时替换 `treasure.py` 和 `.github/workflows/treasure.yml`，否则新增 Secrets 不会传入脚本。首次选择 inspect 验证所有已配置账号；**once 会让每个已配置账号各寻宝一次，all 会分别用完各账号当天次数。**
+
 | 字段 | 来源 |
 |---|---|
+| label | 可选，自定义账号备注 |
 | access_token | 新抓包 POST 请求头里的 T-ACCESS-TOKEN |
 | openid | 同一账号同一次抓包请求头里的 T-OPENID |
 | role_id | 请求正文 role.role_id，保留为字符串 |
@@ -55,6 +72,8 @@ notepad .\auth.json
 
 确认检查成功后，将 `--mode inspect` 改成 `--mode once` 可执行一轮。`auth.json` 已被 .gitignore 排除，但手动网页上传时仍需自己排除该文件。
 
+本地多个账号可分别保存为 auth.json、auth2.json 等，使用 `python treasure.py --config auth.json --config auth2.json --mode inspect`。最多指定 5 个配置文件；显式指定文件时不读取其他账号的环境变量。所有真实配置只保存在本地或 Secret 中，不能上传。
+
 ### 在 GitHub 运行
 
 Actions → 每日四星大吉寻宝 → Run workflow → mode 选择 `inspect`。
@@ -70,6 +89,18 @@ Actions → 每日四星大吉寻宝 → Run workflow → mode 选择 `inspect`�
 在 GitHub Settings → Notifications → System → Actions 启用 Email，并选 Only notify for failed workflows。脚本在登录失败、接口异常或次数变化不符时返回非零退出码，使该次 Actions 失败。GitHub 自带邮件主要通知运行状态；**每日奖励明细在 Actions 的运行 Summary 中查看，不会主动另发奖励邮件。**
 
 本地运行会生成 report.md，GitHub 运行同时写入 GITHUB_STEP_SUMMARY；即使中途失败，也保留此前确认过的奖励。奖励汇总按“某个奖励组合中的项目出现几次”统计，例如“150点券：获得 3 次”。
+
+## 5. 本月累计与历史月份
+
+每次结算成功后，脚本会把奖励写入仓库根目录的 `rewards_history.json`。同一条结算流水不会重复计数。Actions Summary 会同时展示：
+
+- 本次运行每一轮获得的奖励；
+- 当前月份累计确认的寻宝次数和各奖励出现次数；
+- 以前月份的简单汇总。
+
+进入新月份后，旧月份的逐次记录会自动压缩为月份总次数和奖励汇总，当前月份继续保留逐次记录。该功能从升级后的第一次运行开始累计，无法自动补回此前没有保存的历史奖励。
+
+工作流需要 `contents: write` 权限，并在运行结束后由 `github-actions[bot]` 提交 `rewards_history.json`。如果保存步骤提示 403，请进入仓库 Settings → Actions → General → Workflow permissions，允许 Read and write permissions。不要把 `rewards_history.json` 加入 `.gitignore`。
 
 仓库内同时只运行一个寻宝任务。运行期间不要在手机上同时寻宝。如果网络异常发生在开始或结算阶段，服务器可能已处理请求：脚本会停止，请先在手机查看当前状态和获奖记录再重跑。已有未完成寻宝也会停止，避免自动处理未知进度。
 
