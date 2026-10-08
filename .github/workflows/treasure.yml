@@ -2,12 +2,12 @@ name: 每日四星大吉寻宝
 
 on:
   schedule:
-    # UTC 22:03 = 北京时间次日 06:03，再随机延迟 0 至 10 分钟。
-    - cron: '3 22 * * *'
+    # UTC 01:03 = 北京时间 09:03，再随机延迟 0 至 10 分钟
+    - cron: '3 1 * * *'
   workflow_dispatch:
     inputs:
       mode:
-        description: 'inspect 只检查；once 寻宝一次；all 用完当天次数'
+        description: '对所有已配置账号：inspect 只检查；once 各一次；all 各自用完次数'
         type: choice
         default: inspect
         options:
@@ -16,7 +16,7 @@ on:
           - all
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: speed-treasure
@@ -25,17 +25,24 @@ concurrency:
 jobs:
   treasure:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 45
+
     steps:
-      - uses: actions/checkout@v5
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@v6
+      - name: 获取项目文件
+        uses: actions/checkout@v5
+
+      - name: 配置 Python
+        uses: actions/setup-python@v6
         with:
           python-version: '3.12'
+
       - name: 运行寻宝
         env:
           SPEED_AUTH_JSON: ${{ secrets.SPEED_AUTH_JSON }}
+          SPEED_AUTH_JSON_2: ${{ secrets.SPEED_AUTH_JSON_2 }}
+          SPEED_AUTH_JSON_3: ${{ secrets.SPEED_AUTH_JSON_3 }}
+          SPEED_AUTH_JSON_4: ${{ secrets.SPEED_AUTH_JSON_4 }}
+          SPEED_AUTH_JSON_5: ${{ secrets.SPEED_AUTH_JSON_5 }}
           RUN_MODE: ${{ inputs.mode || 'all' }}
           EVENT_NAME: ${{ github.event_name }}
         shell: bash
@@ -44,4 +51,19 @@ jobs:
             python treasure.py --mode all --jitter
           else
             python treasure.py --mode "$RUN_MODE"
+          fi
+
+      - name: 保存奖励累计
+        if: always()
+        shell: bash
+        run: |
+          if [ -f rewards_history.json ]; then
+            git add rewards_history.json
+
+            if ! git diff --cached --quiet; then
+              git config user.name "github-actions[bot]"
+              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+              git commit -m "chore: update monthly reward history"
+              git push
+            fi
           fi
