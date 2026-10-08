@@ -1,6 +1,7 @@
 """掌上飞车四星大吉寻宝。仅依赖 Python 标准库。"""
 import argparse
 import base64
+import hashlib
 import html
 import json
 import os
@@ -168,6 +169,7 @@ def run(client, mode, report, sleep=time.sleep, now=time.time):
         report['rounds'].append({
             'map': report['map'], 'reward': str(reward['package_name']),
             'notice': str(reward.get('msg', '')),
+            'serial': str(reward.get('serial') or reward.get('req_serial') or ''),
         })
         # 结算后等待状态同步；不能仅凭接口成功就无限循环。
         for check in range(3):
@@ -185,10 +187,10 @@ def run(client, mode, report, sleep=time.sleep, now=time.time):
     raise TaskError('达到每次运行最多 20 轮的保护限制。')
 
 
-def write_report(report):
+def render_report(report):
     def safe(value):
         return html.escape(str(value)).replace('|', '&#124;').replace('\n', ' ')
-    lines = ['# 每日寻宝', '', f"时间：{report['time']}", '',
+    lines = [f"## {safe(report.get('label', '账号'))}", '', f"时间：{report['time']}", '',
              f"结果：{safe(report['status'])}", '',
              f"开始次数：{report.get('initial_remaining', '未知')}；"
              f"最后查询次数：{report.get('remaining', '未知')}", '',
@@ -199,7 +201,7 @@ def write_report(report):
         lines += ['| 轮次 | 地图 | 奖励 |', '|---|---|---|']
         for index, item in enumerate(report['rounds'], 1):
             lines.append(f"| {index} | {safe(item['map'])} | {safe(item['reward'])} |")
-        lines += ['', '## 奖励汇总', '']
+        lines += ['', '### 奖励汇总', '']
         rewards = Counter(part.strip() for item in report['rounds']
                           for part in item['reward'].split(',') if part.strip())
         lines += [f'- {safe(name)}：获得 {count} 次' for name, count in rewards.items()]
@@ -207,14 +209,162 @@ def write_report(report):
         lines += [f'- {safe(item)}' for item in dict.fromkeys(r['notice'] for r in report['rounds'])]
     if report.get('error'):
         lines += ['', '失败原因：' + safe(report['error'])]
-    content = '\n'.join(lines) + '\n'
+    return '\n'.join(lines) + '\n'
+
+
+class RewardHistory:
+    """将本月逐次奖励保存在仓库中，并把旧月份压缩为简单汇总。"""
+
+    def __init__(self, path='rewards_history.json', now=None):
+        self.path = Path(path)
+        self.current_month = (now or datetime.now(timezone(timedelta(hours=8)))).strftime('%Y-%m')
+        self.data = {'version': 1, 'months': {}}
+        if self.path.is_file():
+            try:
+                loaded = json.loads(self.path.read_text(encoding='utf-8-sig'))
+            except (OSError, ValueError, UnicodeError):
+                raise TaskError('奖励历史文件损坏，已停止写入；请检查 rewards_history.json。') from None
+            if not isinstance(loaded, dict) or not isinstance(loaded.get('months'), dict):
+                raise TaskError('奖励历史文件结构无效，已停止写入。')
+            self.data = loaded
+        if self._compact_old_months():
+            self.save()
+
+    @staticmethod
+    def _items(reward):
+        return [part.strip() for part in str(reward).split(',') if part.strip()]
+
+    @classmethod
+    def _summary(cls, records):
+        items = Counter(item for record in records for item in record.get('items', cls._items(record.get('reward', ''))))
+        return {'rounds': len(records), 'items': dict(sorted(items.items()))}
+
+    def _compact_old_months(self):
+        changed = False
+        for month, bucket in self.data['months'].items():
+            if month != self.current_month and isinstance(bucket, dict) and isinstance(bucket.get('records'), list):
+                self.data['months'][month] = {'summary': self._summary(bucket['records'])}
+                changed = True
+        return changed
+
+    def record_report(self, report, account_key):
+        if not report.get('rounds'):
+            return False
+        month = str(report.get('time', ''))[:7]
+        if len(month) != 7:
+            raise TaskError('报告时间格式异常，无法记录奖励历史。')
+        bucket = self.data['months'].setdefault(month, {'records': []})
+        if 'records' not in bucket:
+            # 极少数情况下补记旧月数据时保留既有汇总，不伪造逐次记录。
+            summary = bucket.setdefault('summary', {'rounds': 0, 'items': {}})
+            for item in report['rounds']:
+                summary['rounds'] = int(summary.get('rounds', 0)) + 1
+                for name in self._items(item.get('reward', '')):
+                    summary.setdefault('items', {})[name] = int(summary.get('items', {}).get(name, 0)) + 1
+            self.save()
+            return True
+        existing = {str(record.get('id')) for record in bucket['records']}
+        changed = False
+        for index, item in enumerate(report['rounds'], 1):
+            record_id = item.get('serial') or hashlib.sha256(
+                f"{account_key}|{report.get('time')}|{index}|{item.get('reward')}".encode('utf-8')).hexdigest()[:24]
+            if record_id in existing:
+                continue
+            bucket['records'].append({
+                'id': record_id,
+                'time': report.get('time'),
+                'account': report.get('label', '账号'),
+                'map': item.get('map', ''),
+                'reward': item.get('reward', ''),
+                'items': self._items(item.get('reward', '')),
+            })
+            existing.add(record_id)
+            changed = True
+        if changed:
+            self.save()
+        return changed
+
+    def save(self):
+        self.path.write_text(json.dumps(self.data, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+
+    def markdown(self):
+        def safe(value):
+            return html.escape(str(value)).replace('|', '&#124;').replace('\n', ' ')
+        lines = ['# 奖励累计', '', f'## 本月累计（{self.current_month}）', '']
+        current = self.data['months'].get(self.current_month, {})
+        records = current.get('records', []) if isinstance(current, dict) else []
+        summary = self._summary(records)
+        lines.append(f"累计确认寻宝：{summary['rounds']} 次")
+        lines.append('')
+        if summary['items']:
+            lines += [f"- {safe(name)}：获得 {count} 次" for name, count in summary['items'].items()]
+        else:
+            lines.append('- 本月尚未记录奖励')
+        lines += ['', '## 历史月份简要汇总', '']
+        old_months = [month for month in self.data['months'] if month != self.current_month]
+        if not old_months:
+            lines.append('- 暂无历史月份记录')
+        for month in sorted(old_months, reverse=True):
+            bucket = self.data['months'][month]
+            old = bucket.get('summary') or self._summary(bucket.get('records', []))
+            details = '；'.join(f'{safe(name)} × {count}' for name, count in old.get('items', {}).items()) or '无奖励明细'
+            lines.append(f"- **{safe(month)}**：{int(old.get('rounds', 0))} 次；{details}")
+        return '\n'.join(lines) + '\n'
+
+
+def write_reports(reports, history=None):
+    failed = sum(bool(r.get('error')) for r in reports)
+    content = (f'# 每日寻宝\n\n已处理账号：{len(reports)}；失败账号：{failed}\n\n'
+               + '\n---\n\n'.join(render_report(report) for report in reports))
+    if history is not None:
+        content += '\n---\n\n' + history.markdown()
     Path('report.md').write_text(content, encoding='utf-8')
     if os.getenv('GITHUB_STEP_SUMMARY'):
-        with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as file:
+        # 每个账号完成后写入全部已完成结果，防止后续账号失败覆盖此前奖励。
+        with open(os.environ['GITHUB_STEP_SUMMARY'], 'w', encoding='utf-8') as file:
             file.write(content)
-    print('执行结果：' + report['status'])
-    if report.get('error'):
-        print('失败原因：' + report['error'])
+
+
+def normalize_pasted_json(raw):
+    """仅在标准 JSON 解析失败后修复已观察到的聊天格式转义。"""
+    output = []
+    inside = False
+    index = 0
+    entities = ('&#x20;', '&#X20;', '&#32;', '&nbsp;', '&#160;', '&#xa0;', '&#xA0;')
+    while index < len(raw):
+        char = raw[index]
+        if inside and char == '\\' and index + 1 < len(raw):
+            following = raw[index + 1]
+            output.append('_' if following == '_' else char + following)
+            index += 2
+            continue
+        if char == '"':
+            inside = not inside
+        if not inside:
+            entity = next((e for e in entities if raw.startswith(e, index)), None)
+            if entity:
+                output.append(' ')
+                index += len(entity)
+                continue
+            if char.isspace():
+                char = ' '
+        output.append(char)
+        index += 1
+    return ''.join(output)
+
+
+def parse_config(raw):
+    raw = raw.lstrip('\ufeff')
+    try:
+        config = json.loads(raw)
+    except ValueError:
+        try:
+            config = json.loads(normalize_pasted_json(raw))
+        except ValueError:
+            raise TaskError('配置 JSON 格式有误：已尝试修复复制产生的空格和下划线转义；请检查双引号、逗号及最外层花括号，不要带代码框。') from None
+    if not isinstance(config, dict):
+        raise TaskError('配置必须是 JSON 对象。')
+    return config
 
 
 def load_config(config_path=None):
@@ -227,40 +377,72 @@ def load_config(config_path=None):
             raw = path.read_text(encoding='utf-8-sig')
         except (OSError, UnicodeError):
             raise TaskError('无法读取配置文件，请检查文件权限并保存为 UTF-8。') from None
-    try:
-        config = json.loads(raw.lstrip('\ufeff'))
-    except ValueError:
-        raise TaskError('配置 JSON 格式有误：请使用普通双引号和空格；下划线前不能有反斜线。建议从 auth.example.json 复制模板。') from None
-    if not isinstance(config, dict):
-        raise TaskError('配置必须是 JSON 对象。')
-    return config
+    return parse_config(raw)
+
+
+def account_sources(paths=None):
+    if paths:
+        if len(paths) > 5:
+            raise TaskError('最多支持 5 个账号配置文件。')
+        return [(i, lambda p=p: load_config(p)) for i, p in enumerate(paths, 1)]
+    sources = []
+    for slot in range(1, 6):
+        name = 'SPEED_AUTH_JSON' if slot == 1 else f'SPEED_AUTH_JSON_{slot}'
+        raw = os.environ.get(name, '')
+        if raw.strip():
+            sources.append((slot, lambda raw=raw: parse_config(raw)))
+    return sources or [(1, lambda: load_config())]
+
+
+def run_accounts(sources, mode, client_factory=Client, runner=run, sink=write_reports, history=None):
+    reports = []
+    seen = set()
+    for slot, loader in sources:
+        report = {'time': datetime.now(timezone(timedelta(hours=8))).isoformat(timespec='seconds'),
+                  'label': f'账号 {slot}', 'rounds': [], 'status': '失败'}
+        identity = None
+        try:
+            config = loader()
+            if isinstance(config.get('label'), str) and config['label'].strip():
+                report['label'] += ' — ' + config['label'].strip()[:80]
+            client = client_factory(config)
+            identity = (str(config.get('role_id')), str(config.get('area_id', 1)))
+            if identity in seen:
+                raise TaskError('此角色和大区已在前面的账号中配置，跳过重复执行。')
+            seen.add(identity)
+            runner(client, mode, report)
+        except TaskError as error:
+            report['error'] = str(error)
+        except Exception:
+            # 不输出可能含令牌、Cookie 或个人信息的异常对象。
+            report['error'] = '配置或响应结构出现未预期异常；请核对配置并更新脱敏抓包。'
+        reports.append(report)
+        if history is not None and identity is not None:
+            history.record_report(report, '|'.join(identity))
+            sink(reports, history)
+        else:
+            sink(reports)
+        print(f"账号 {slot} 执行结果：{report['status']}")
+        if report.get('error'):
+            print('失败原因：' + report['error'])
+    return int(any(r.get('error') for r in reports))
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--mode', choices=['inspect', 'once', 'all'], default='inspect')
     parser.add_argument('--jitter', action='store_true')
-    parser.add_argument('--config', help='本地 JSON 配置文件路径；省略时优先读取环境变量，再读取脚本旁的 auth.json')
+    parser.add_argument('--config', action='append', help='本地 JSON 配置路径，可重复传入，最多 5 个；省略时读取各账号环境变量或 auth.json')
     args = parser.parse_args()
-    report = {'time': datetime.now(timezone(timedelta(hours=8))).isoformat(timespec='seconds'),
-              'rounds': [], 'status': '失败'}
-    code = 0
     try:
-        config = load_config(args.config)
-        client = Client(config)
-        if args.jitter:
-            time.sleep(random.randint(0, 600))
-        run(client, args.mode, report)
+        sources = account_sources(args.config)
+        history = RewardHistory()
     except TaskError as error:
-        report['error'] = str(error)
-        code = 1
-    except Exception:
-        # 不输出可能含令牌、Cookie 或个人信息的异常对象。
-        report['error'] = '配置或响应结构出现未预期异常；请核对配置并更新脱敏抓包。'
-        code = 1
-    finally:
-        write_report(report)
-    return code
+        print('失败原因：' + str(error))
+        return 1
+    if args.jitter:
+        time.sleep(random.randint(0, 600))
+    return run_accounts(sources, args.mode, history=history)
 
 
 if __name__ == '__main__':
