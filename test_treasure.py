@@ -54,6 +54,25 @@ class Tests(unittest.TestCase):
             text = history.markdown()
             self.assertIn('累计确认寻宝：1 次', text)
             self.assertIn('150点券：获得 1 次', text)
+            self.assertIn('### 账号 1', text)
+            self.assertIn('### 全部账号合计', text)
+
+    def test_reward_history_separates_three_accounts(self):
+        with tempfile.TemporaryDirectory() as folder:
+            history = RewardHistory(Path(folder) / 'rewards_history.json',
+                                    datetime(2026, 10, 8, tzinfo=timezone(timedelta(hours=8))))
+            for slot, reward_name in enumerate(('奖励甲', '奖励乙', '奖励丙'), 1):
+                report = {'time': '2026-10-08T09:00:00+08:00',
+                          'label': f'账号 {slot}',
+                          'rounds': [{'map': '木叶物语', 'reward': reward_name,
+                                      'notice': '', 'serial': f'serial-{slot}'}]}
+                history.record_report(report, f'role-{slot}|1')
+            text = history.markdown()
+            for slot, reward_name in enumerate(('奖励甲', '奖励乙', '奖励丙'), 1):
+                self.assertIn(f'### 账号 {slot}', text)
+                self.assertIn(f'{reward_name}：获得 1 次', text)
+            self.assertIn('### 全部账号合计', text)
+            self.assertEqual(text.count('累计确认寻宝：3 次'), 1)
 
     def test_reward_history_compacts_previous_month(self):
         with tempfile.TemporaryDirectory() as folder:
