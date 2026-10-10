@@ -239,11 +239,29 @@ class RewardHistory:
         items = Counter(item for record in records for item in record.get('items', cls._items(record.get('reward', ''))))
         return {'rounds': len(records), 'items': dict(sorted(items.items()))}
 
+    @classmethod
+    def _account_summaries(cls, records):
+        grouped = {}
+        for record in records:
+            label = str(record.get('account', '未知账号'))
+            key = str(record.get('account_key') or label)
+            bucket = grouped.setdefault(key, {'label': label, 'rounds': 0, 'items': {}})
+            bucket['label'] = label
+            bucket['rounds'] += 1
+            for name in record.get('items', cls._items(record.get('reward', ''))):
+                bucket['items'][name] = int(bucket['items'].get(name, 0)) + 1
+        for bucket in grouped.values():
+            bucket['items'] = dict(sorted(bucket['items'].items()))
+        return grouped
+
     def _compact_old_months(self):
         changed = False
         for month, bucket in self.data['months'].items():
             if month != self.current_month and isinstance(bucket, dict) and isinstance(bucket.get('records'), list):
-                self.data['months'][month] = {'summary': self._summary(bucket['records'])}
+                self.data['months'][month] = {
+                    'summary': self._summary(bucket['records']),
+                    'accounts': self._account_summaries(bucket['records']),
+                }
                 changed = True
         return changed
 
@@ -257,10 +275,15 @@ class RewardHistory:
         if 'records' not in bucket:
             # 极少数情况下补记旧月数据时保留既有汇总，不伪造逐次记录。
             summary = bucket.setdefault('summary', {'rounds': 0, 'items': {}})
+            accounts = bucket.setdefault('accounts', {})
+            account = accounts.setdefault(account_key, {
+                'label': report.get('label', '账号'), 'rounds': 0, 'items': {}})
             for item in report['rounds']:
                 summary['rounds'] = int(summary.get('rounds', 0)) + 1
+                account['rounds'] = int(account.get('rounds', 0)) + 1
                 for name in self._items(item.get('reward', '')):
                     summary.setdefault('items', {})[name] = int(summary.get('items', {}).get(name, 0)) + 1
+                    account.setdefault('items', {})[name] = int(account.get('items', {}).get(name, 0)) + 1
             self.save()
             return True
         existing = {str(record.get('id')) for record in bucket['records']}
@@ -274,6 +297,7 @@ class RewardHistory:
                 'id': record_id,
                 'time': report.get('time'),
                 'account': report.get('label', '账号'),
+                'account_key': account_key,
                 'map': item.get('map', ''),
                 'reward': item.get('reward', ''),
                 'items': self._items(item.get('reward', '')),
@@ -294,12 +318,19 @@ class RewardHistory:
         current = self.data['months'].get(self.current_month, {})
         records = current.get('records', []) if isinstance(current, dict) else []
         summary = self._summary(records)
-        lines.append(f"累计确认寻宝：{summary['rounds']} 次")
-        lines.append('')
-        if summary['items']:
-            lines += [f"- {safe(name)}：获得 {count} 次" for name, count in summary['items'].items()]
+        accounts = self._account_summaries(records)
+        if accounts:
+            for account in accounts.values():
+                lines += [f"### {safe(account['label'])}", '',
+                          f"累计确认寻宝：{account['rounds']} 次", '']
+                lines += ([f"- {safe(name)}：获得 {count} 次" for name, count in account['items'].items()]
+                          or ['- 本月尚未记录奖励'])
+                lines.append('')
         else:
-            lines.append('- 本月尚未记录奖励')
+            lines += ['- 本月尚未记录奖励', '']
+        lines += ['### 全部账号合计', '', f"累计确认寻宝：{summary['rounds']} 次", '']
+        lines += ([f"- {safe(name)}：获得 {count} 次" for name, count in summary['items'].items()]
+                  or ['- 本月尚未记录奖励'])
         lines += ['', '## 历史月份简要汇总', '']
         old_months = [month for month in self.data['months'] if month != self.current_month]
         if not old_months:
@@ -309,6 +340,13 @@ class RewardHistory:
             old = bucket.get('summary') or self._summary(bucket.get('records', []))
             details = '；'.join(f'{safe(name)} × {count}' for name, count in old.get('items', {}).items()) or '无奖励明细'
             lines.append(f"- **{safe(month)}**：{int(old.get('rounds', 0))} 次；{details}")
+            old_accounts = bucket.get('accounts') or self._account_summaries(bucket.get('records', []))
+            for account in old_accounts.values():
+                account_details = '；'.join(
+                    f'{safe(name)} × {count}' for name, count in account.get('items', {}).items()) or '无奖励明细'
+                lines.append(
+                    f"  - {safe(account.get('label', '未知账号'))}："
+                    f"{int(account.get('rounds', 0))} 次；{account_details}")
         return '\n'.join(lines) + '\n'
 
 
