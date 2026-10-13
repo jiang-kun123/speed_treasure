@@ -241,10 +241,18 @@ class RewardHistory:
 
     @classmethod
     def _account_summaries(cls, records):
+        # 兼容旧版只有显示名称的记录。仅在名称唯一对应一个角色时归并。
+        identities = {}
+        for record in records:
+            if record.get('account_key'):
+                label = str(record.get('account', '未知账号'))
+                identities.setdefault(label, set()).add(str(record['account_key']))
         grouped = {}
         for record in records:
             label = str(record.get('account', '未知账号'))
-            key = str(record.get('account_key') or label)
+            candidates = identities.get(label, set())
+            key = str(record.get('account_key') or (
+                next(iter(candidates)) if len(candidates) == 1 else 'legacy:' + label))
             bucket = grouped.setdefault(key, {'label': label, 'rounds': 0, 'items': {}})
             bucket['label'] = label
             bucket['rounds'] += 1
@@ -252,7 +260,7 @@ class RewardHistory:
                 bucket['items'][name] = int(bucket['items'].get(name, 0)) + 1
         for bucket in grouped.values():
             bucket['items'] = dict(sorted(bucket['items'].items()))
-        return grouped
+        return dict(sorted(grouped.items(), key=lambda pair: (pair[1]['label'], pair[0])))
 
     def _compact_old_months(self):
         changed = False
@@ -485,3 +493,4 @@ def main():
 
 if __name__ == '__main__':
     raise SystemExit(main())
+
